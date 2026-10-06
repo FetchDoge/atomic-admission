@@ -1,20 +1,24 @@
 # atomic-admission
 
-**Thesis:** agent overspend is stopped at the meter, not at the payment rail. The party that meters the call atomically decrements a non-negative credit in the *same step* that admits it. At zero, the call never runs — so nothing is billable, no matter how many IPs, retries, or credentials the agent throws at it.
+**Thesis:** Agent overspend is stopped at the meter, not at the payment rail.
+The party that meters the call atomically decrements a non-negative credit in the *same step* that admits it.
+At zero, the call never runs. So nothing is billable, no matter how many IPs, retries, or credentials the agent throws at it.
 
 ## Why this exists
 
-September–October 2026 produced the incidents that motivate it: an agent that spent $5,000 via 36 untraceable IPs and then argued it did nothing wrong; a runaway accounting-agent loop (15,000+ API calls, ~$50K in under an hour, per Mandiant); 10–50× agentic billing shocks. The common shape: **cost is created when the call is accepted, not when the invoice settles.** Blocking settlement after the fact leaves the customer owing the money. Declining a checkout the agent never visits changes nothing.
+The common shape: **cost is created when the call is accepted, not when the invoice settles.** September–October 2026 produced the incidents that motivate it: an agent that spent $5,000 via 36 untraceable IPs and then argued it did nothing wrong; a runaway accounting-agent loop (15,000+ API calls, ~$50K in under an hour, per Mandiant); 10–50× agentic billing shocks. Blocking settlement after the fact leaves the customer owing the money. Declining a checkout the agent never visits changes nothing.
 
-So the enforcement point moves to where liability is *created*: admission.
+The enforcement point moves to where liability is *created*: admission.
 
 ## The mechanism
 
-Three invariants, enforced by one atomic transaction per admission:
+Three invariants, enforced by one atomic transaction per admission.
 
-1. **Atomic admission (K1).** Check balance, decrement, and write the reservation in a single `BEGIN IMMEDIATE` transaction. A job either holds a durable reservation or it never started — there is no third state, including across `kill -9`.
-2. **Idempotent admission (K2).** Every admission carries an idempotency key. Replays return the original verdict; a retry can never double-charge.
+1. **Atomic admission (K1).** Check balance, decrement, and write the reservation in a single `BEGIN IMMEDIATE` transaction. A job either holds a durable reservation or it never started. There is no third state, including across `kill -9`.
+2. **Idempotent admission (K2).** Every admission carries an idempotency key. Replays return the original verdict. A retry can never double-charge.
 3. **Hard cap (K3).** Total liability (reserved-but-unsettled + settled) can never exceed the cap. The balance floor is zero, sampled continuously under concurrency.
+
+Marcus Richards: draft only. Every rewritten sentence is a reframe of a claim already in the supplied README — VERIFIED by direct comparison; no new metric, guarantee, or incident. "The common shape:" is the source's frame, kept; the rejected verdict sentence is absent. "Adversarial infrastructure" omitted — INFERRED that inserting the spine definition would add a claim the source does not make. File the wording judgment in Decisions; file the patch in Grok Build only if you approve the push.
 
 ## Prove it
 
