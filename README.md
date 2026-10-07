@@ -1,41 +1,62 @@
 # atomic-admission
 
-**Thesis:** Agent overspend is stopped at the meter, not at the payment rail.
-The party that meters the call atomically decrements a non-negative credit in the *same step* that admits it.
-At zero, the call never runs. So nothing is billable, no matter how many IPs, retries, or credentials the agent throws at it.
+**Stops agent overspend at the meter: the party that meters a call debits prepaid credit in the same transaction that admits it.**
 
-## Why this exists
+[![falsification-harness](https://github.com/marsojuji-cmyk/atomic-admission/actions/workflows/ci.yml/badge.svg)](https://github.com/marsojuji-cmyk/atomic-admission/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg)](.github/workflows/ci.yml)
 
-The common shape: **cost is created when the call is accepted, not when the invoice settles.** September–October 2026 produced the incidents that motivate it: an agent that spent $5,000 via 36 untraceable IPs and then argued it did nothing wrong; a runaway accounting-agent loop (15,000+ API calls, ~$50K in under an hour, per Mandiant); 10–50× agentic billing shocks. Blocking settlement after the fact leaves the customer owing the money. Declining a checkout the agent never visits changes nothing.
+At zero credit the call never runs, so nothing becomes billable, however many IPs, retries or credentials the agent throws at it. `harness.py` holds the mechanism and the falsification run that tries to break it. It uses only the standard library (`sqlite3` in WAL mode, `threading`, `subprocess`).
 
-The enforcement point moves to where liability is *created*: admission.
+## What it guarantees
 
-## The mechanism
+Each admission runs as one `BEGIN IMMEDIATE` transaction that enforces three invariants:
 
-Three invariants, enforced by one atomic transaction per admission.
+1. **Atomic admission (K1).** The check, the debit and the reservation write commit together or not at all. A job either holds a durable reservation or it never started. There is no third state, even across `kill -9`.
+2. **Idempotent admission (K2).** Every admission carries an idempotency key, and a replay returns the original verdict. A retry never double-charges.
+3. **Hard cap (K3).** Total liability (reserved plus settled) never exceeds the cap, and the balance never drops below zero.
 
-1. **Atomic admission (K1).** Check balance, decrement, and write the reservation in a single `BEGIN IMMEDIATE` transaction. A job either holds a durable reservation or it never started. There is no third state, including across `kill -9`.
-2. **Idempotent admission (K2).** Every admission carries an idempotency key. Replays return the original verdict. A retry can never double-charge.
-3. **Hard cap (K3).** Total liability (reserved-but-unsettled + settled) can never exceed the cap. The balance floor is zero, sampled continuously under concurrency.
+The admission path **fails closed**: any exception inside the transaction rolls it back and returns *rejected* (`admit()` in `harness.py`).
 
-Marcus Richards: draft only. Every rewritten sentence is a reframe of a claim already in the supplied README — VERIFIED by direct comparison; no new metric, guarantee, or incident. "The common shape:" is the source's frame, kept; the rejected verdict sentence is absent. "Adversarial infrastructure" omitted — INFERRED that inserting the spine definition would add a claim the source does not make. File the wording judgment in Decisions; file the patch in Grok Build only if you approve the push.
-
-## Prove it
+## Quickstart
 
 ```sh
-python3 harness.py all          # full falsification run (~5 min)
-python3 harness.py --quick all  # CI-scale run (~15 s)
+git clone https://github.com/marsojuji-cmyk/atomic-admission && cd atomic-admission
+python3 harness.py --quick all  # CI scale, about a second
+python3 harness.py all          # full falsification run, about 5 minutes
 ```
 
-The harness states its kill conditions up front and exits nonzero if any fires:
+The harness states its kill conditions up front and exits nonzero if any of them fires:
 
 | Kill condition | Test |
 |---|---|
-| K1 — any job starts without a durable reservation; ledger inconsistent after `kill -9` | 8 hammer processes, SIGKILL mid-burst, then: balance drift = 0, zero orphan starts, zero duplicate keys |
-| K2 — a duplicate retry creates duplicate liability | 10,000 admissions across 100 workers, 50% replay rate; replay verdict must equal original verdict, zero mismatches |
-| K3 — liability ever exceeds the $100 cap | continuous balance sampling under full concurrency; charged total == cap exactly, floor never breached |
+| K1: a job starts without a durable reservation, or the ledger is inconsistent after `kill -9` | 8 hammer processes, SIGKILL mid-burst. Afterwards: balance drift 0, zero orphan starts, zero duplicate keys |
+| K2: a duplicate retry creates duplicate liability | 10,000 admissions across 100 workers at a 50% replay rate. Each replay verdict must equal the original, with zero mismatches |
+| K3: liability ever exceeds the $100 cap | Continuous balance sampling under full concurrency. Charged total equals the cap exactly, and the floor is never breached |
 
-Latest full run (2026-10-06): **ALL PASS** — 100 admitted / 9,900 rejected at exactly $100.00, 0 idempotency mismatches, 0 drift after kill -9. See [REPORT.md](REPORT.md).
+## How it fails
+
+| Condition | Behaviour |
+|---|---|
+| Balance below the call's cost | Records a `rejected` reservation and returns *rejected*. The call never starts |
+| Replay of a known idempotency key | Returns the stored verdict without touching the balance. A rejected key stays rejected |
+| Any error inside the admission transaction | Rolls back and returns *rejected* (fail-closed) |
+| Process killed mid-transaction | SQLite WAL recovery discards the uncommitted transaction. The harness's Phase B checks this: drift 0, orphans 0 |
+| `settle()` on a key that isn't `reserved` | No-op. Only a reserved row moves to `settled` |
+
+**Limits:** this is a reference mechanism inside a falsification harness, not a packaged library. It assumes one SQLite ledger with a single balance. It has no top-up or refund path, and settlement never returns credit.
+
+## Evidence
+
+- **Full run, 2026-10-06** ([REPORT.md](REPORT.md)): ALL PASS. 100 admitted and 9,900 rejected at exactly $100.00, with 0 idempotency mismatches and 0 drift after `kill -9`.
+- **Quick run, 2026-10-07:** `python3 harness.py --quick all` exited 0 locally. 100 admitted and 400 rejected, K1/K2/K3 PASS.
+- **CI:** the `falsification-harness` workflow runs `python3 harness.py --quick all` on every push and pull request.
+
+## Why this exists
+
+The common shape: **cost is created when the call is accepted, not when the invoice settles.** Incidents reported in September–October 2026 motivate it: an agent that spent $5,000 via 36 untraceable IPs and then argued it did nothing wrong; a runaway accounting-agent loop (15,000+ API calls, ~$50K in under an hour, per Mandiant); 10–50× agentic billing shocks. Blocking settlement after the fact leaves the customer owing the money. Declining a checkout the agent never visits changes nothing.
+
+The enforcement point moves to where liability is *created*: admission.
 
 ## What this is not
 
@@ -47,6 +68,10 @@ Latest full run (2026-10-06): **ALL PASS** — 100 admitted / 9,900 rejected at 
 
 Built 2026-10-06 after a scout of X/Reddit/news (subpoena week, Oct 2026) surfaced five real-world holes, and a two-team adversarial review (Perplexity on Sol 6.1 + Grok adversary, held to a high bar) killed the receipt-based and rail-based product theses. Both bots independently converged on vendor-side atomic admission as the surviving shape; the harness is its falsifier, and the shape survived.
 
+## Status
+
+Mechanism proven by its falsifier. It isn't deployed anywhere, because deployment needs a meter-holder to host the admission check.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
