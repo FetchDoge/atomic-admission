@@ -66,7 +66,7 @@ The enforcement point moves to where liability is *created*: admission.
 
 ## Origin
 
-Built 2026-10-06 after a scout of X/Reddit/news (subpoena week, Oct 2026) surfaced five real-world holes, and a two-team adversarial review (Perplexity on Sol 6.1 + Grok adversary, held to a high bar) killed the receipt-based and rail-based product theses. Both bots independently converged on vendor-side atomic admission as the surviving shape; the harness is its falsifier, and the shape survived.
+Built 2026-10-06 after a scout of X/Reddit/news (subpoena week, Oct 2026) surfaced five real-world holes, and a two-team adversarial review (two independent AI-model reviewers, held to a high bar) killed the receipt-based and rail-based product theses. Both reviewers independently converged on vendor-side atomic admission as the surviving shape; the harness is its falsifier, and the shape survived.
 
 ## Status
 
