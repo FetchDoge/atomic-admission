@@ -2,7 +2,7 @@
 
 **Stops agent overspend at the meter: the party that meters a call debits prepaid credit in the same transaction that admits it.**
 
-[![falsification-harness](https://github.com/marsojuji-cmyk/atomic-admission/actions/workflows/ci.yml/badge.svg)](https://github.com/marsojuji-cmyk/atomic-admission/actions/workflows/ci.yml)
+[![falsification-harness](https://github.com/FetchDoge/atomic-admission/actions/workflows/ci.yml/badge.svg)](https://github.com/FetchDoge/atomic-admission/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg)](.github/workflows/ci.yml)
 
@@ -21,7 +21,7 @@ The admission path **fails closed**: any exception inside the transaction rolls 
 ## Quickstart
 
 ```sh
-git clone https://github.com/marsojuji-cmyk/atomic-admission && cd atomic-admission
+git clone https://github.com/FetchDoge/atomic-admission && cd atomic-admission
 python3 harness.py --quick all  # CI scale, about a second
 python3 harness.py all          # full falsification run, about 5 minutes
 ```
