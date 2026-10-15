@@ -3,7 +3,7 @@
 **Stops agent overspend at the meter: the party that meters a call debits prepaid credit in the same transaction that admits it.**
 
 [![falsification-harness](https://github.com/FetchDoge/atomic-admission/actions/workflows/ci.yml/badge.svg)](https://github.com/FetchDoge/atomic-admission/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg)](.github/workflows/ci.yml)
 
 At zero credit the call never runs, so nothing becomes billable, however many IPs, retries or credentials the agent throws at it. `harness.py` holds the mechanism and the falsification run that tries to break it. It uses only the standard library (`sqlite3` in WAL mode, `threading`, `subprocess`).
@@ -76,4 +76,5 @@ Built by Marcus Richards, directing AI coding agents.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Copyright 2026 Marcus Richards.
+Licensed under the Apache License 2.0. See LICENSE.
