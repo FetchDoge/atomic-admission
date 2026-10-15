@@ -72,6 +72,8 @@ Built 2026-10-06 after a scout of X/Reddit/news (subpoena week, Oct 2026) surfac
 
 Mechanism proven by its falsifier. It isn't deployed anywhere, because deployment needs a meter-holder to host the admission check.
 
+Built by Marcus Richards, directing AI coding agents.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
