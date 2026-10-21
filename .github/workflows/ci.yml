@@ -8,5 +8,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: run unit tests (spec-first suite)
+        run: python3 -m unittest discover tests -v
       - name: run falsification harness (CI scale)
         run: python3 harness.py --quick all

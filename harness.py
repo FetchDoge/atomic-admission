@@ -11,144 +11,80 @@ Binary kill conditions:
       every committed reservation has its balance decrement and vice versa;
       no started job lacks a committed reservation.
   K2 (idempotency): duplicate retries on the same idempotency key must not
-      create duplicate liability.
+      create duplicate liability or duplicate refunds.
   K3 (cap): total liability (reserved-but-unsettled + settled) must never
-      exceed CAP.
+      exceed CAP, and ledger balance must never drop below zero.
 
 Usage:
-  harness.py phaseA   # concurrency + idempotency + cap (100 threads, 10k admissions)
+  harness.py phaseA   # concurrency + idempotency + cap + reconciliation (100 threads, 10k admissions)
   harness.py phaseB   # crash: spawn hammer procs, kill -9 mid-burst, check K1
   harness.py hammer <prefix> <n>   # child mode: tight admit loop
 """
 import os
 import random
 import signal
-import sqlite3
 import subprocess
 import sys
 import threading
 import time
 
+from atomic_admission import AtomicMeter, EPS
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(HERE, "ledger.db")
 CAP = 100.0
 COST = 1.0
-EPS = 1e-6
+
+_meter = AtomicMeter(DB, initial_cap=CAP)
 
 
 def init_db():
     for p in (DB, DB + "-wal", DB + "-shm", DB + "-journal"):
         if os.path.exists(p):
-            os.remove(p)
-    con = sqlite3.connect(DB, timeout=60)
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("CREATE TABLE ledger(balance REAL NOT NULL)")
-    con.execute("INSERT INTO ledger(balance) VALUES (?)", (CAP,))
-    con.execute(
-        "CREATE TABLE reservations(idem TEXT PRIMARY KEY, amount REAL NOT NULL, state TEXT NOT NULL)"
-    )
-    con.execute("CREATE TABLE started(job TEXT PRIMARY KEY, idem TEXT NOT NULL)")
-    con.commit()
-    con.close()
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    global _meter
+    _meter = AtomicMeter(DB, initial_cap=CAP)
 
 
 def admit(idem, amount):
-    """Atomic admission. True iff a durable reservation is committed (or was)."""
-    con = sqlite3.connect(DB, timeout=60, isolation_level=None)
-    try:
-        con.execute("BEGIN IMMEDIATE")
-        ex = con.execute(
-            "SELECT state FROM reservations WHERE idem=?", (idem,)
-        ).fetchone()
-        if ex:
-            con.execute("COMMIT")
-            return ex[0] in ("reserved", "settled")  # replay: original verdict
-        bal = con.execute("SELECT balance FROM ledger").fetchone()[0]
-        if bal < amount - EPS:
-            con.execute(
-                "INSERT INTO reservations(idem,amount,state) VALUES(?,?, 'rejected')",
-                (idem, amount),
-            )
-            con.execute("COMMIT")
-            return False
-        con.execute("UPDATE ledger SET balance = balance - ?", (amount,))
-        con.execute(
-            "INSERT INTO reservations(idem,amount,state) VALUES(?,?, 'reserved')",
-            (idem, amount),
-        )
-        con.execute("COMMIT")
-        return True
-    except Exception:
-        try:
-            con.execute("ROLLBACK")
-        except Exception:
-            pass
-        return False
-    finally:
-        con.close()
+    return _meter.admit(idem, amount)
 
 
-def settle(idem):
-    con = sqlite3.connect(DB, timeout=60, isolation_level=None)
-    try:
-        con.execute("BEGIN IMMEDIATE")
-        con.execute(
-            "UPDATE reservations SET state='settled' WHERE idem=? AND state='reserved'",
-            (idem,),
-        )
-        con.execute("COMMIT")
-    except Exception:
-        try:
-            con.execute("ROLLBACK")
-        except Exception:
-            pass
-    finally:
-        con.close()
+def settle(idem, actual_amount=None):
+    return _meter.settle(idem, actual_amount=actual_amount)
+
+
+def release(idem):
+    return _meter.release(idem)
 
 
 def mark_started(job, idem):
-    con = sqlite3.connect(DB, timeout=60)
-    con.execute("INSERT OR IGNORE INTO started(job,idem) VALUES(?,?)", (job, idem))
-    con.commit()
-    con.close()
+    _meter.mark_started(job, idem)
 
 
 def read_balance():
-    con = sqlite3.connect(DB, timeout=60)
-    bal = con.execute("SELECT balance FROM ledger").fetchone()[0]
-    con.close()
-    return bal
+    return _meter.get_balance()
 
 
 def consistency_report():
-    """Returns (ok, details) for K1."""
-    con = sqlite3.connect(DB, timeout=60)
-    bal = con.execute("SELECT balance FROM ledger").fetchone()[0]
-    reserved_sum = (
-        con.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM reservations WHERE state IN ('reserved','settled')"
-        ).fetchone()[0]
-    )
-    orphans = con.execute(
-        """SELECT COUNT(*) FROM started s LEFT JOIN reservations r
-           ON s.idem = r.idem AND r.state IN ('reserved','settled')
-           WHERE r.idem IS NULL"""
-    ).fetchone()[0]
-    dupes = con.execute(
-        "SELECT COUNT(*) FROM (SELECT idem FROM reservations GROUP BY idem HAVING COUNT(*)>1)"
-    ).fetchone()[0]
-    con.close()
-    drift = abs((reserved_sum + bal) - CAP)
-    return (
-        drift < 1e-4 and orphans == 0 and dupes == 0,
-        f"drift={drift:.6f} orphans={orphans} dupe_idems={dupes} balance={bal:.2f}",
-    )
+    return _meter.verify_consistency()
 
 
 def phase_a(n_threads=100, n_jobs=100):
-    """Concurrency + idempotency + cap. Default: 100 threads, 10k admissions, dup retries."""
+    """Concurrency + idempotency + cap + credit reconciliation."""
     init_db()
-    stats = {"admitted": 0, "rejected": 0, "idem_mismatch": 0}
+    stats = {
+        "admitted": 0,
+        "rejected": 0,
+        "released": 0,
+        "partial_settled": 0,
+        "full_settled": 0,
+        "idem_mismatch": 0,
+        "over_settle_caught": 0,
+    }
     lock = threading.Lock()
     min_bal = [CAP]
     stop = threading.Event()
@@ -167,12 +103,43 @@ def phase_a(n_threads=100, n_jobs=100):
             ok = admit(idem, COST)
             with lock:
                 stats["admitted" if ok else "rejected"] += 1
+
             if ok:
-                mark_started(idem, idem)
-                if random.random() < 0.3:
-                    time.sleep(random.random() * 0.002)
-                settle(idem)
-            # duplicate retry on the same key — must never double-charge.
+                r = random.random()
+                if r < 0.10:
+                    # Case 1: Pre-execution cancellation/timeout
+                    rel_ok = release(idem)
+                    with lock:
+                        if rel_ok:
+                            stats["released"] += 1
+                else:
+                    mark_started(idem, idem)
+                    if random.random() < 0.2:
+                        time.sleep(random.random() * 0.002)
+
+                    # Malicious over-settlement probe: attempt to claim more than reserved
+                    if random.random() < 0.05:
+                        try:
+                            settle(idem, actual_amount=COST * 2.0)
+                        except ValueError:
+                            with lock:
+                                stats["over_settle_caught"] += 1
+
+                    if r < 0.40:
+                        # Case 2: Partial settlement (reconciliation of unspent credit)
+                        actual = round(random.uniform(0.1, 0.8) * COST, 4)
+                        s_ok = settle(idem, actual_amount=actual)
+                        with lock:
+                            if s_ok:
+                                stats["partial_settled"] += 1
+                    else:
+                        # Case 3: Full settlement
+                        s_ok = settle(idem)
+                        with lock:
+                            if s_ok:
+                                stats["full_settled"] += 1
+
+            # Duplicate retry on the same key — must never double-charge.
             # Strict rule: replay verdict must equal the original verdict.
             if random.random() < 0.5:
                 ok2 = admit(idem, COST)
@@ -192,24 +159,18 @@ def phase_a(n_threads=100, n_jobs=100):
     mon.join()
     dur = time.time() - t0
 
-    con = sqlite3.connect(DB, timeout=60)
-    bal = con.execute("SELECT balance FROM ledger").fetchone()[0]
-    charged = (
-        con.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM reservations WHERE state IN ('reserved','settled')"
-        ).fetchone()[0]
-    )
-    n_started = con.execute("SELECT COUNT(*) FROM started").fetchone()[0]
-    con.close()
-
+    ok_consist, details = consistency_report()
+    bal = read_balance()
     k2_ok = stats["idem_mismatch"] == 0
-    k3_ok = min_bal[0] >= -EPS and charged <= CAP + EPS
+    k3_ok = min_bal[0] >= -EPS and ok_consist and bal >= -EPS
+
     print(f"phaseA: {dur:.1f}s admitted={stats['admitted']} rejected={stats['rejected']} "
-          f"started={n_started} charged={charged:.2f} min_balance={min_bal[0]:.2f}")
+          f"released={stats['released']} partial={stats['partial_settled']} full={stats['full_settled']} "
+          f"min_balance={min_bal[0]:.2f} end_balance={bal:.2f}")
     print(f"K2 idempotency: {'PASS' if k2_ok else 'KILL'} "
           f"(mismatches={stats['idem_mismatch']})")
-    print(f"K3 cap: {'PASS' if k3_ok else 'KILL'} "
-          f"(charged={charged:.2f} <= {CAP}, min_balance={min_bal[0]:.2f} >= 0)")
+    print(f"K3 cap & reconciliation: {'PASS' if k3_ok else 'KILL'} "
+          f"({details})")
     return k2_ok and k3_ok
 
 
@@ -242,9 +203,14 @@ def hammer(prefix, n):
     for j in range(int(n)):
         idem = f"{prefix}-{j}"
         if admit(idem, COST):
-            mark_started(idem, idem)
-            if j % 3 == 0:
-                settle(idem)
+            if j % 7 == 0:
+                release(idem)
+            else:
+                mark_started(idem, idem)
+                if j % 3 == 0:
+                    settle(idem, actual_amount=0.5 * COST)
+                else:
+                    settle(idem)
 
 
 if __name__ == "__main__":
